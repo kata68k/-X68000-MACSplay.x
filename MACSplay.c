@@ -3,7 +3,12 @@
 #include <string.h>
 #include <doslib.h>
 #include <iocslib.h>
+#include <interrupt.h>
+#include <unistd.h>
+
+#include "usr_style.h"
 #include "usr_define.h"
+#include "usr_macro.h"
 #include "FileManager.h"
 
 #define IOCS_OFST		(0x100)
@@ -13,23 +18,54 @@
 #define IOCS_ADPCMMOD	(0x67)
 
 int32_t	MACS_Play(int8_t *, int32_t, int32_t, int32_t, int32_t);
+int32_t	MACS_PlayCtrl(void);
 int32_t	MACS_Load(int8_t *, int32_t, int8_t);
-int32_t	MACS_Load_Hi(int8_t *, int32_t);
+int32_t	MACS_MemFree(int32_t);
+int32_t	MACS_DriverVer_CHK(int8_t *, int32_t, int32_t);
+int32_t	MACS_FileVer_CHK(int8_t *, int32_t);
 int32_t	MACS_CHK(void);
 int32_t	SYS_STAT_CHK(void);
 int32_t	HIMEM_CHK(void);
 int32_t	PCM8A_CHK(void);
 int32_t ADPCM_Stop(void);
+void Set_DI(void);
+void Set_EI(void);
+static void interrupt IntVect(void);
 void HelpMessage(void);
 int16_t main(int16_t, int8_t **);
 
+/* グローバル変数 */
 int32_t g_nCommand = 0;
 int32_t g_nBuffSize = -1;
 int32_t g_nAbort = 1;
 int32_t g_nEffect = 0;
 int32_t g_nPCM8Achk = 0;
 int32_t g_nRepeat = 1;
+int32_t g_nPlayHistory = 0;
+int32_t g_nBreak = 0;
+int32_t g_nCansel = 0;
+int32_t	g_nIntLevel = 0;
+int32_t	g_nIntCount = 0;
 
+int8_t		g_sMACS_File_List[256][256]	=	{0};
+uint32_t	g_unMACS_File_List_MAX	=	0u;
+
+int8_t		g_sMACS_File_Path[256][256]	=	{0};
+
+int32_t		g_nPlayListMode = 0;
+int32_t		g_nFileListNum = 0;		/* 現在のリスト番号 */
+int32_t		g_nFileListNumMAX = 0;	/* リストの最大数 */
+int32_t		g_nMemAllocNumMAX = 0;	/* リストの最大数 */
+static int8_t	*g_pMACS_Buff[256];		/* MACSデータのポインタ */
+static int8_t	g_bMACS_MemMode[256];	/* MACSデータのメモリモード */
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 /*	MACS_Play() MACS_Cal.docより
 *	Input:
 *		d1.w > コマンドコード
@@ -167,30 +203,112 @@ int32_t	MACS_Play(int8_t *pMacsBuff, int32_t nCommand, int32_t nBuffSize, int32_
 	return retReg;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t	MACS_PlayCtrl(void)
+{
+	int32_t ret = 0;
+	int32_t nLoop;
+	int32_t nPlayCount;
+	int8_t	*pBuff = NULL;
+	
+	nLoop = g_nRepeat;
+
+	do
+	{
+		if(g_nRepeat == 0)
+		{
+			nLoop = 1;
+		}
+		else
+		{
+			nLoop--;
+		}
+	
+		for(nPlayCount = 0; nPlayCount < g_nFileListNumMAX; nPlayCount++)
+		{
+			void *p;
+			
+			g_nFileListNum = nPlayCount;
+			
+			pBuff = g_pMACS_Buff[nPlayCount];
+
+			if(pBuff != NULL)
+			{
+				_dos_kflushio(0xFF);	/* キーバッファをクリア */
+				
+				g_nCommand = 0;	/* 再生 */
+				ret = MACS_Play(pBuff, g_nCommand, g_nBuffSize, g_nAbort, g_nEffect);	/* 再生 */
+				
+				p = (void *)_iocs_b_intvcs( 0x4C, (int32_t)IntVect );	/* MFP (key seral input あり */
+				sleep(1);
+				_iocs_b_intvcs( 0x4C, (int32_t)p );	/* 元に戻す */
+				
+				if(g_nBreak != 0u)
+				{
+					printf("message:Qキーによる強制終了します。\n");
+					nLoop = 0;
+					break;		/* 強制終了 */
+				}
+				
+				if(ret < 0)
+				{
+					printf("message:ESCによる中断もしくは異常を検知しました。\n");
+					continue;	/* スキップ */
+				}
+				else
+				{
+					if(g_nPlayHistory != 0)	/* 視聴履歴機能 */
+					{
+						SetHisFileCnt(g_sMACS_File_Path[nPlayCount]);	/* 再生回数を更新 */
+					}
+				}
+			}
+			
+		}
+	}
+	while(nLoop);
+	
+	return ret;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int32_t	MACS_Load(int8_t *sFileName, int32_t nFileSize, int8_t bMode)
 {
 	int32_t ret = 0;
 	int8_t	*pBuff = NULL;
-	int32_t nLoop;
 	int16_t f_ver;
 	
-	g_nCommand = 3;	/* ドライババージョン取得 */
-	ret = MACS_Play(pBuff, g_nCommand, g_nBuffSize, g_nAbort, g_nEffect);	/* 実行 */
-	f_ver = FileHeader_Load(sFileName, NULL, sizeof(uint8_t), nFileSize );	/* ヘッダ情報読み込み */
+	/* バージョンチェック：旧バージョンドライバで新バージョンファイルを再生しないようにする。 */
+	ret = MACS_DriverVer_CHK(sFileName, nFileSize, 3);	/* ドライババージョン */
+	
+	f_ver = (int16_t)MACS_FileVer_CHK(sFileName, nFileSize);	/* ファイルバージョン */
+	
 	if(f_ver < 0)
 	{
-		printf("error：MACSデータが異常です！(DRV=%x.%x,DATA=%x.%x)\n", ((ret>>8) & 0xFF), (ret & 0xFF), ((f_ver>>8) & 0xF), (f_ver & 0xFF));
+		printf("error：MACSデータに異常があります！(DRV=%x.%x,DATA=%x.%x,FILESIZE=%d)\n", ((ret>>8) & 0xFF), (ret & 0xFF), ((f_ver>>8) & 0xF), (f_ver & 0xFF), nFileSize);
 		return -1;
 	}
 	else
 	{
 		if(ret == 0x123)	/* 改造バージョン */
 		{
-			g_nCommand = 17;	/* 改造ドライババージョン取得 */
-			ret = MACS_Play(pBuff, g_nCommand, g_nBuffSize, g_nAbort, g_nEffect);	/* 実行 */
+			/* 下位互換ありなのでチェック不要 */
+			ret = MACS_DriverVer_CHK(sFileName, nFileSize, 17);	/* 改造ドライババージョン取得(17) */
 			//printf("MACSDRV.X Version %x.%x.%x を検出しました\n", ((ret>>16) & 0xFF), ((ret>>8) & 0xFF), (ret & 0xFF));
 		}
-		else
+		else				/* 普通バージョン */
 		{
 			if(ret < f_ver)
 			{
@@ -202,6 +320,7 @@ int32_t	MACS_Load(int8_t *sFileName, int32_t nFileSize, int8_t bMode)
 		
 	}
 	
+	/* メモリ確保 */
 	switch(bMode)
 	{
 	case 0:
@@ -218,68 +337,172 @@ int32_t	MACS_Load(int8_t *sFileName, int32_t nFileSize, int8_t bMode)
 		break;
 	}
 	
-	if(pBuff != NULL)
+	if(pBuff == NULL)
 	{
-		if( File_Load(sFileName, pBuff, sizeof(uint8_t), nFileSize ) == 0 )	/* ファイル読み込みからメモリへ保存 */
-		{
-			if(pBuff >= (int8_t*)0x1000000)	/* TS-6BE16相当のアドレス値以上で確保されているか？ */
-			{
-				printf("ハイメモリで再生します");
-			}
-			else
-			{
-				printf("メインメモリで再生します");
-			}
-			printf("(addr=0x%p)\n", pBuff);	/* メモリの先頭アドレスを表示 */
-			
-			nLoop = g_nRepeat;
-			do
-			{
-				if(g_nRepeat == 0)
-				{
-					nLoop = 1;
-				}
-				else
-				{
-					nLoop--;
-				}
-				_dos_kflushio(0xFF);	/* キーバッファをクリア */
-				
-				g_nCommand = 0;	/* 再生 */
-				ret = MACS_Play(pBuff, g_nCommand, g_nBuffSize, g_nAbort, g_nEffect);	/* 再生 */
-				if(ret < 0)
-				{
-					break;
-				}
-			}
-			while(nLoop);
-		}
-		
-		switch(bMode)
-		{
-		case 0:
-			MyMfree(pBuff);		/* メモリ解放 */
-			break;
-		case 1:
-			MyMfreeJ(pBuff);	/* メモリ解放 */
-			break;
-		case 2:
-			MyMfreeHi(pBuff);	/* メモリ解放 */
-			break;
-		default:
-			MyMfree(pBuff);		/* メモリ解放 */
-			break;
-		}
+		printf("error：MACS_Load buffer null(%d)\n", bMode);
+		return -1;
 	}
 	else
 	{
-		printf("error：メモリ確保できませんでした！(%d)\n", bMode);
-		ret = -1;
+		if(pBuff >= (int8_t*)0x1000000)	/* TS-6BE16相当のアドレス値以上で確保されているか？ */
+		{
+			printf("Hi-Memory");
+		}
+		else
+		{
+			printf("Main-Memory");
+		}
+		printf("(addr=0x%p)\n", pBuff);	/* メモリの先頭アドレスを表示 */
+	}
+		
+	g_pMACS_Buff[g_nMemAllocNumMAX] = pBuff;	/* アドレスを代入*/
+	g_bMACS_MemMode[g_nMemAllocNumMAX] = bMode;	/* モードを記憶 */
+	
+	if(g_nPlayHistory != 0)	/* フルパスを記憶する */
+	{
+		int32_t nPlayHisCnt;
+		
+		nPlayHisCnt = GetHisFileCnt(sFileName);	/* ヒストリファイルから */
+		if(nPlayHisCnt > 0)
+		{
+			printf("message:このファイルの再生回数は%4ld回です。\n", nPlayHisCnt);	/* プレイ回数を表示 */
+		}
+		else if(nPlayHisCnt == 0)
+		{
+			printf("message:このファイルは初めて再生されます。\n");	/* 初再生 */
+		}
+		else
+		{
+			/* 何もしない */
+		}
+	}
+		
+	if( File_Load(sFileName, pBuff, sizeof(uint8_t), nFileSize ) == 0 )	/* ファイル読み込みからメモリへ保存 */
+	{
+		g_nMemAllocNumMAX++;	/* メモリ確保できたらカウント */
+		
+		if(g_nPlayHistory != 0)	/* フルパスを記憶する */
+		{
+			int8_t	*p;
+			
+			_fullpath(g_sMACS_File_Path[g_nFileListNumMAX], sFileName, 128);	/* フルパスを取得 */
+			
+			while ((p = strchr(g_sMACS_File_Path[g_nFileListNumMAX], '/'))!=NULL) *p = '\\';
+		}
+		g_nFileListNumMAX++;
+		
+
+		ret = 0;
+	}
+	else	/* ロードキャンセル */
+	{
+		MACS_MemFree(g_nMemAllocNumMAX);
+		g_pMACS_Buff[g_nMemAllocNumMAX] = NULL;	/* 初期化 */
+	}
+
+	return ret;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t	MACS_MemFree(int32_t nNum)
+{
+	int32_t ret = 0;
+	int32_t nPlayCount;
+	int32_t nPlayCount_s;
+	int32_t nPlayCount_e;
+	int8_t	*pBuff = NULL;
+	int8_t bMode;
+	
+	nPlayCount = 0;
+	
+	if(nNum < 0)
+	{
+		nPlayCount_s = 0;
+		nPlayCount_e = g_nMemAllocNumMAX;
+	}
+	else
+	{
+		nPlayCount_s = nNum;
+		nPlayCount_e = nNum+1;
+	}
+	
+	for(nPlayCount = nPlayCount_s; nPlayCount < nPlayCount_e; nPlayCount++)
+	{
+		pBuff = g_pMACS_Buff[nPlayCount];
+		bMode = g_bMACS_MemMode[nPlayCount];
+		
+		if(pBuff != NULL)
+		{
+			switch(bMode)
+			{
+			case 0:
+				MyMfree(pBuff);		/* メモリ解放 */
+				break;
+			case 1:
+				MyMfreeJ(pBuff);	/* メモリ解放 */
+				break;
+			case 2:
+				MyMfreeHi(pBuff);	/* メモリ解放 */
+				break;
+			default:
+				MyMfree(pBuff);		/* メモリ解放 */
+				break;
+			}
+			g_pMACS_Buff[nPlayCount] = NULL;
+		}
 	}
 	
 	return ret;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t	MACS_DriverVer_CHK(int8_t *sFileName, int32_t nFileSize, int32_t nDriverVer)
+{
+	int32_t ret = 0;
+	int8_t	*pBuff = NULL;
+	
+	/* バージョンチェック */
+	ret = MACS_Play(pBuff, nDriverVer, g_nBuffSize, g_nAbort, g_nEffect);	/* 実行 */
+	
+	return ret;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t	MACS_FileVer_CHK(int8_t *sFileName, int32_t nFileSize)
+{
+	int32_t ret = 0;
+	
+	/* バージョンチェック */
+	ret = (int32_t)FileHeader_Load(sFileName, NULL, sizeof(uint8_t), nFileSize );	/* ヘッダ情報読み込み */
+	
+	return ret;
+}
+		
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int32_t	MACS_CHK(void)
 {
 	int32_t ret = 0;	/* 0:常駐 !0:常駐していない */
@@ -304,6 +527,13 @@ int32_t	MACS_CHK(void)
 	return ret;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int32_t	SYS_STAT_CHK(void)
 {
 	struct	_regs	stInReg = {0}, stOutReg = {0};
@@ -326,6 +556,13 @@ int32_t	SYS_STAT_CHK(void)
 	return (retReg & 0x0F);
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int32_t	HIMEM_CHK(void)
 {
 	int32_t ret = 0;	/* 0:常駐 !0:常駐していない */
@@ -353,6 +590,13 @@ int32_t	HIMEM_CHK(void)
 	return ret;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int32_t	PCM8A_CHK(void)
 {
 	struct	_regs	stInReg = {0}, stOutReg = {0};
@@ -366,6 +610,13 @@ int32_t	PCM8A_CHK(void)
 	return retReg;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 /* (AD)PCM効果音の停止 */
 int32_t ADPCM_Stop(void)
 {
@@ -379,11 +630,121 @@ int32_t ADPCM_Stop(void)
 	
 	return	ret;
 }
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+void Set_DI(void)
+{
+	if(g_nIntCount == 0)
+	{
+#if 0
+		/*スーパーバイザーモード終了*/
+		if(g_nSuperchk > 0)
+		{
+			_dos_super(g_nSuperchk);
+		}
+#endif
+		g_nIntLevel = intlevel(6);	/* 割禁設定 */
+		g_nIntCount = Minc(g_nIntCount, 1u);
+		
+#if 0
+		/* スーパーバイザーモード開始 */
+		g_nSuperchk = _dos_super(0);
+#endif
+	}
+	else
+	{
+		g_nIntCount = Minc(g_nIntCount, 1u);
+	}
+}
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+void Set_EI(void)
+{
+	if(g_nIntCount == 1)
+	{
+		g_nIntCount = Mdec(g_nIntCount, 1);
+		
+		/* スプリアス割り込みの中の人も(以下略)より */
+		/* MFPでデバイス毎の割込み禁止設定をする際には必ずSR操作で割込みレベルを上げておく。*/
+		asm ("\ttst.b $E9A001\n\tnop\n");
+		/*
+			*8255(ｼﾞｮｲｽﾃｨｯｸ)の空読み
+			nop		*直前までの命令パイプラインの同期
+					*早い話、この命令終了までには
+					*それ以前のバスサイクルなどが
+					*完了していることが保証される。
+		*/
+#if 0
+		/*スーパーバイザーモード終了*/
+		if(g_nSuperchk > 0)
+		{
+			_dos_super(g_nSuperchk);
+		}
+#endif
+		intlevel(g_nIntLevel);	/* 割禁解除 */
+#if 0
+		/* スーパーバイザーモード開始 */
+		g_nSuperchk = _dos_super(0);
+#endif
+	}
+	else
+	{
+		g_nIntCount = Mdec(g_nIntCount, 1);
+	}
+}
+
+static void interrupt IntVect(void)
+{
+	volatile uint8_t *MFP_USART_D = (uint8_t *)0xE8802Fu;
+	uint8_t ubKey;
+	
+	Set_DI();	/* 割禁設定 */
+	
+	ubKey = *MFP_USART_D;
+	
+	if(ubKey == 0x11u)	/* Q */
+	{
+		g_nBreak = 1;
+		g_nPlayListMode = 0;
+	}
+	
+	if(g_nCansel == 0x01u) /* ESC */
+	{
+		g_nCansel = 1;
+	}
+	
+	SetKeyInfo(ubKey);	/* ファイルマネージャーへ */
+	
+//	printf("Hit! 0x%x :", *MFP_USART_D);
+	
+	Set_EI();	/* 割禁解除 */
+
+	IRTE();	/* 0x0000-0x00FF割り込み関数の最後で必ず実施 */
+//	IRTS();	/* 0x0100-0x01FF割り込み関数の最後で必ず実施 */
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 void HelpMessage(void)
 {
 	puts("MACSデータの再生を行います。");
-	puts("  68030以降に限りメインメモリが足りない場合はハイメモリを使って再生を行います。");
+	puts("  68030以降に限りメインメモリの空き容量が足りない場合はハイメモリを使って再生を行います。");
 	puts("  ※ハイメモリでADPCMを再生する際は、PCM8A.X -w18 での常駐");
 	puts("    もしくは、060turbo.sys -ad を設定ください。");
 	puts("");
@@ -397,21 +758,30 @@ void HelpMessage(void)
 	puts("       -SP ｽﾌﾟﾗｲﾄを表示したまま再生する");
 	puts("       -AD PCM8A.Xの常駐をチェックしない(060turbo.sys -adで再生する場合)");
 	puts("       -Rx リピート再生するx=1～255回、x=0(無限ループ)");
+	puts("       -L  プレイリスト<file>を読み込んで逐次再生する");
+	puts("       -LA プレイリスト<file>を読み込んで再生する");
+	puts("       -HS 再生したファイルの履歴を<MACSPHIS.LOG>に残す");
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
 int16_t main(int16_t argc, int8_t *argv[])
 {
 	int16_t ret = 0;
-	int32_t nOut = 0;
 	int32_t	nFileSize = 0;
 	int32_t	nFilePos = 0;
 	
-	puts("MACS data Player「MACSplay.x」v1.05a (c)2022 カタ.");
+	int32_t	i, j;
+	
+	puts("MACS data Player「MACSplay.x」v1.06d (c)2022-2023 カタ.");
 	
 	if(argc > 1)	/* オプションチェック */
 	{
-		int16_t i;
-		
 		for(i = 1; i < argc; i++)
 		{
 			int8_t	bOption;
@@ -422,52 +792,13 @@ int16_t main(int16_t argc, int8_t *argv[])
 
 			if(bOption == TRUE)
 			{
-				bFlag	= ((argv[i][1] == '?') || (argv[i][1] == 'h') || (argv[i][1] == 'H')) ? TRUE : FALSE;
-				
-				if(bFlag == TRUE)
-				{
-					HelpMessage();	/* ヘルプ */
-					ret = -1;
-				}
-				
-				bFlag	= ((argv[i][1] == 'd') || (argv[i][1] == 'D')) ? TRUE : FALSE;
-				if(bFlag == TRUE)
-				{
-					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_0);
-					puts("パレットを50%暗くします");
-					continue;
-				}
-
-				bFlag	= ((argv[i][1] == 'p') || (argv[i][1] == 'P')) ? TRUE : FALSE;
-				if(bFlag == TRUE)
-				{
-					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_1);
-					puts("PCMの再生をしません");
-					continue;
-				}
-
-				bFlag	= ((argv[i][1] == 'k') || (argv[i][1] == 'K')) ? TRUE : FALSE;
-				if(bFlag == TRUE)
-				{
-					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_2);
-					puts("キー入力時、終了しません");
-					continue;
-				}
-
-				bFlag	= ((argv[i][1] == 'c') || (argv[i][1] == 'C')) ? TRUE : FALSE;
-				if(bFlag == TRUE)
-				{
-					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_3);
-					puts("アニメ終了時、画面を初期化しません");
-					continue;
-				}
-				
+				/* ===== ２文字 =====*/
 				bFlag	= ((argv[i][1] == 's') || (argv[i][1] == 'S')) ? TRUE : FALSE;
 				bFlag2	= ((argv[i][2] == 'l') || (argv[i][2] == 'L')) ? TRUE : FALSE;
 				if((bFlag == TRUE) && (bFlag2 == TRUE))
 				{
 					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_4);
-					puts("MACSDRVがスリープしている時でも再生します");
+					puts("Option:MACSDRVがスリープしている時でも再生します");
 					continue;
 				}
 
@@ -476,7 +807,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 				if((bFlag == TRUE) && (bFlag2 == TRUE))
 				{
 					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_5);
-					puts("ｸﾞﾗﾌｨｯｸを表示したまま再生します");
+					puts("Option:ｸﾞﾗﾌｨｯｸを表示したまま再生します");
 					continue;
 				}
 				
@@ -485,7 +816,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 				if((bFlag == TRUE) && (bFlag2 == TRUE))
 				{
 					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_6);
-					puts("ｽﾌﾟﾗｲﾄを表示したまま再生します");
+					puts("Option:ｽﾌﾟﾗｲﾄを表示したまま再生します");
 					continue;
 				}
 
@@ -494,7 +825,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 				if((bFlag == TRUE) && (bFlag2 == TRUE))
 				{
 					g_nPCM8Achk = 1;
-					puts("PCM8A.Xの常駐をチェックしません");
+					puts("Option:PCM8A.Xの常駐をチェックしません");
 					continue;
 				}
 
@@ -510,13 +841,82 @@ int16_t main(int16_t argc, int8_t *argv[])
 					g_nEffect = Mbclr(g_nEffect, Bit_3);	/* -C アニメ終了時画面を初期化しないを有効にする */
 					if(g_nRepeat == 0)
 					{
-						puts("無限ループで再生します");
+						puts("Option:無限ループで再生します");
 					}
 					else
 					{
-						printf("%d回リピート再生します\n", g_nRepeat);
+						printf("Option:%d回リピート再生します\n", g_nRepeat);
 					}
 					continue;
+				}
+				
+				bFlag	= ((argv[i][1] == 'h') || (argv[i][1] == 'H')) ? TRUE : FALSE;
+				bFlag2	= ((argv[i][2] == 's') || (argv[i][2] == 'S')) ? TRUE : FALSE;
+				if((bFlag == TRUE) && (bFlag2 == TRUE))
+				{
+					g_nPlayHistory = 1;
+					puts("Option:再生したファイルの履歴を<MACSPHIS.LOG>に残します");
+					continue;
+				}
+
+				bFlag	= ((argv[i][1] == 'l') || (argv[i][1] == 'L')) ? TRUE : FALSE;
+				bFlag2	= ((argv[i][2] == 'a') || (argv[i][2] == 'A')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nPlayListMode = 2;
+					puts("Option:プレイリスト<file>を読み込んで再生します");
+					continue;
+				}
+				
+				/* ===== １文字 =====*/
+				
+				bFlag	= ((argv[i][1] == 'd') || (argv[i][1] == 'D')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_0);
+					puts("Option:パレットを50%暗くします");
+					continue;
+				}
+
+				bFlag	= ((argv[i][1] == 'p') || (argv[i][1] == 'P')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_1);
+					puts("Option:PCMの再生をしません");
+					continue;
+				}
+
+				bFlag	= ((argv[i][1] == 'k') || (argv[i][1] == 'K')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_2);
+					puts("Option:キー入力時、終了しません");
+					continue;
+				}
+
+				bFlag	= ((argv[i][1] == 'c') || (argv[i][1] == 'C')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nEffect = Mbset(g_nEffect, 0x7F, Bit_3);
+					puts("Option:アニメ終了時、画面を初期化しません");
+					continue;
+				}
+				
+				
+				bFlag	= ((argv[i][1] == 'l') || (argv[i][1] == 'L')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					g_nPlayListMode = 1;
+					puts("Option:プレイリスト<file>を読み込んで逐次再生します");
+					continue;
+				}
+				
+				bFlag	= ((argv[i][1] == '?') || (argv[i][1] == 'h') || (argv[i][1] == 'H')) ? TRUE : FALSE;
+				if(bFlag == TRUE)
+				{
+					HelpMessage();	/* ヘルプ */
+					ret = -1;
+					break;
 				}
 				
 				HelpMessage();	/* ヘルプ */
@@ -525,15 +925,21 @@ int16_t main(int16_t argc, int8_t *argv[])
 			}
 			else
 			{
+				nFilePos = i;
+//				printf("nFilePos = %d\n", nFilePos);
+#if 0				
+				nFileSize = 0;
 				if(GetFileLength(argv[i], &nFileSize) < 0)	/* ファイルのサイズ取得 */
 				{
 					printf("error：ファイルが見つかりませんでした！%s\n", argv[i]);
+					ret = -1;
 				}
 				else
 				{
 					nFilePos = i;
 //					printf("File Size = %d[MB](%d[KB], %d[byte])\n", nFileSize>>20, nFileSize>>10, nFileSize);
 				}
+#endif
 			}
 		}
 	}
@@ -543,97 +949,195 @@ int16_t main(int16_t argc, int8_t *argv[])
 		ret = -1;
 	}
 	
+	/* ドライバ常駐チェック */
 	if(MACS_CHK() != 0)
 	{
 		puts("error：MACSDRVを常駐してください！");
 		ret = -1;
 	}
 	
+	
 	if(ret == 0)
 	{
-		//printf("Option = 0x%x\n", g_nEffect);
-
-		if(nFileSize != 0)
+		int32_t nOut = 0;
+		int8_t	data_b;
+		int32_t	nSysStat;
+		
+		/* 機種判別 */
+		data_b = _iocs_b_bpeek((int32_t *)0xCBC);	/* 機種判別 */
+		//printf("機種判別(MPU680%d0)\n", data_b);
+		
+		if(data_b != 0)	/* 68000以外のMPU */
 		{
-			int32_t	nSysStat;
+			nSysStat = SYS_STAT_CHK();	/* MPUの種類 */
+		}
+		else
+		{
+			nSysStat = (int32_t)data_b;	/* 0が入る */
+		}
+		
+		if(g_nPlayListMode != 0)
+		{
+//			printf("g_nPlayListMode = %d\n", g_nPlayListMode);
+			Load_MACS_List(argv[nFilePos], g_sMACS_File_List, &g_unMACS_File_List_MAX);	/* 動画(MACS)リストの読み込み */
+//			for(i = 0; i < g_unMACS_File_List_MAX; i++)
+//			{
+//				printf("MACS  File %2d = %s\n", i, g_sMACS_File_List[i]);
+//			}
+		}
+		else
+		{
+//			printf("g_nPlayListMode = %d\n", g_nPlayListMode);
+			Get_MACS_File(argv[nFilePos], g_sMACS_File_List, &g_unMACS_File_List_MAX);	/* ファイルをチェックする */
+//			memcpy(  g_sMACS_File_List[0], argv[nFilePos], sizeof(char) * strlen(argv[nFilePos]) ); 
+		}
+		
+		for(i=0,j=0; i < g_unMACS_File_List_MAX; i++)
+		{
 			int32_t	nMemSize;
 			int32_t	nHiMemChk;
-			int8_t	data_b;
-			
+			int32_t	nChk;
+			void *p;
+
+			//printf("Option = 0x%x\n", g_nEffect);
+			nFileSize = 0;
+			GetFileLength( g_sMACS_File_List[i], &nFileSize );	/* ファイルのサイズ取得 */
+			if(nFileSize == 0)
+			{
+				puts("error：ファイルサイズが異常です！");
+				continue;
+			}
+				
+			if(g_nPlayListMode != 0)
+			{
+				printf("\n");	/* 改行のみ */
+				printf("-= MACS File List No.%04d =-\n", i+1);
+			}
+
 			nMemSize = (int32_t)_dos_malloc(-1) - 0x81000000UL;	/* メインメモリの空きチェック */
 			
-			data_b = _iocs_b_bpeek((int32_t *)0xCBC);	/* 機種判別 */
-//			printf("機種判別(MPU680%d0)\n", data_b);
+			nHiMemChk = HIMEM_CHK();	/* ハイメモリ実装チェック */
 			
-			if(data_b != 0)	/* 68000以外のMPU */
+			nChk = PCM8A_CHK();			/* PCM8A常駐チェック */
+				
+			p = (void *)_iocs_b_intvcs( 0x4C, (int32_t)IntVect );	/* MFP (key seral input あり */
+				
+			if( (nHiMemChk == 0) && ((nChk >= 0) || (g_nPCM8Achk > 0)) )	/* ハイメモリ実装 & (PCM8A常駐チェック or -ADで無効化) */
 			{
-				nSysStat = SYS_STAT_CHK();	/* MPUの種類 */
+				nOut = MACS_Load(g_sMACS_File_List[i], nFileSize, 2);	/* ハイメモリ再生 */
+			}
+			else if( (nHiMemChk != 0) && ((nSysStat == 4) || (nSysStat == 6)) )		/* ハイメモリ未実装 & 040/060EXCEL */
+			{
+				printf("(040/060EXCEL)");
+				nOut = MACS_Load(g_sMACS_File_List[i], nFileSize, 1);	/* 拡張されたメモリで再生 */
+			}
+			else if(nFileSize <= nMemSize)	/* メインメモリ */
+			{
+				nOut = MACS_Load(g_sMACS_File_List[i], nFileSize, 0);	/* メイン再生 */
 			}
 			else
 			{
-				nSysStat = (int32_t)data_b;	/* 0が入る */
-			}
-		
-			nHiMemChk = HIMEM_CHK();	/* ハイメモリ実装チェック */
-
-			if(nHiMemChk == 0)		/* ハイメモリ実装 */
-			{
-				int32_t	nChk = PCM8A_CHK();
+				nOut = -5;	/* 異常 */
 				
-				if( (nChk >= 0) || (g_nPCM8Achk > 0))	/* PCM8A常駐チェック or -ADで無効化 */
+				if(nChk < 0)	/* >=0:常駐 <0:常駐していない */
 				{
-					nOut = MACS_Load(argv[nFilePos], nFileSize, 2);	/* ハイメモリ再生 */
+					puts("error：PCM8Aが常駐されていません！※ハイメモリを使う場合は、PCM8A -w18 で常駐ください！");
 				}
-				else if(nFileSize <= nMemSize)	/* メインメモリ */
+				
+				if(nHiMemChk != 0)
 				{
-					nOut = MACS_Load(argv[nFilePos], nFileSize, 0);		/* メイン再生 */
+					puts("error：ハイメモリが見つかりませんでした！");
+				}
+				
+				puts("error：メインメモリの空きが不足です！");
+				
+				ret = -1;
+			}
+			
+			_iocs_b_intvcs( 0x4C, (int32_t)p );	/* 元に戻す */
+			
+			if( (nOut == 0) && (g_nPlayListMode == 0) )	/* 単一再生時 */
+			{
+				nOut = MACS_PlayCtrl();	/* 再生制御 */
+				MACS_MemFree(-1);			/* メモリ解放 */
+			}
+			else if(nOut == 1)	/* プレイリスト再生 */
+			{
+				if(g_nPlayListMode <= 1)	/* プレイリスト再生 */
+				{
+					puts("error：再生できませんでした！skipします！");
+				}
+				else if(g_nPlayListMode == 2)	/* プレイリスト再生 */
+				{
+					nOut = MACS_PlayCtrl();	/* 再生制御 */
+					MACS_MemFree(-1);	/* メモリ解放 */
+					if(nOut < 0)
+					{
+						j = 0;
+					}
+					else
+					{
+						if(j < 3)
+						{
+							if(j == 0)
+							{
+								puts("message:一度読み込みを中断し、再生します！");
+								i--;	/* 読めなかった分を再チャレンジ */
+							}
+							else
+							{
+								printf("warning：リトライします！(%d)", j);
+							}
+							j++;
+						}
+						else
+						{
+							nOut = -5;
+							ret = -1;
+						}
+					}
 				}
 				else
 				{
-					if(nChk < 0)	/* >=0:常駐 <0:常駐していない */
-					{
-						puts("error:PCM8Aが常駐されていません！");
-						puts("※ハイメモリを使う場合は、PCM8A -w18 で常駐ください！");
-					}
+					nOut = -5;	/* 異常 */
 				}
 			}
-			else
+			
+			if( g_nBreak != 0u )	/* Q */
 			{
-				if((nHiMemChk != 0) && ((nSysStat == 4) || (nSysStat == 6)) )		/* ハイメモリ未実装 & 040/060EXCEL */
-				{
-					printf("(040/060EXCEL)");
-					nOut = MACS_Load(argv[nFilePos], nFileSize, 1);		/* 拡張されたメモリで再生 */
-				}
-				else if(nFileSize <= nMemSize)	/* メインメモリ */
-				{
-					nOut = MACS_Load(argv[nFilePos], nFileSize, 0);		/* メイン再生 */
-				}
-				else						/* ハイメモリ or NG */
-				{
-					puts("error：メインメモリの空きが不足です！");
-					puts("error：HIMEMが見つかりませんでした！");
-					ret = -1;
-				}
+				ret = -2;
+				break;
 			}
 		}
-	}
-	
-	if(nOut < 0)
-	{
-		switch(nOut)
+		
+		/* ここは、暫定実装 */
+		if(g_nPlayListMode != 0)	/* プレイリスト再生 */
 		{
-		case -1:
-			puts("error：再生に失敗しました！");
-			break;
-		case -4:
-			puts("再生を中断しました。");
-			break;
-		default:
-			printf("error：異常終了しました！(%d)\n", nOut);
-			break;
+			nOut = MACS_PlayCtrl();	/* 再生制御 */
+			MACS_MemFree(-1);	/* メモリ解放 */
 		}
-	} 
-	printf("\n");
+		
+		if(nOut < 0)
+		{
+			switch(nOut)
+			{
+			case -1:
+				puts("error：再生に失敗しました！");
+				break;
+			case -2:
+				puts("message:強制終了しました。");
+				break;
+			case -4:
+				puts("message:再生を中断しました。");
+				break;
+			default:
+				printf("error：異常終了しました！(%d)\n", nOut);
+				break;
+			}
+		} 
+		printf("\n");
+			
+	}
 	
 	ADPCM_Stop();	/* 音を止める */
 

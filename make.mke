@@ -6,7 +6,7 @@ AS	= has
 LD	= hlk
 LKFLAGS	= -r -z-stack=131072
 INC	= 
-LIBS	= libc.a libgnu.a libdos.a libiocs.a
+LIBS	= libc.a libgnu.a libdos.a libiocs.a user/hupairlib.l
 
 MACSplay.x:	MACSplay.o FileManager.o
 	$(LD) $^ -o $@ -l $(LIBS)

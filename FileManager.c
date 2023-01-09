@@ -11,11 +11,14 @@
 #include <iocslib.h>
 #include <interrupt.h>
 
-#include "inc/usr_macro.h"
+#include "usr_macro.h"
 
 #include "FileManager.h"
 
 asm("	.include	doscall.mac");
+
+/* キー情報 */
+static uint8_t	g_ubFileManagerGetKey;
 		
 /* 関数のプロトタイプ宣言 */
 int16_t File_Load(int8_t *, void *, size_t, size_t);
@@ -23,6 +26,7 @@ int16_t FileHeader_Load(int8_t *, void *, size_t, size_t);
 int16_t File_strSearch(FILE *, char *, int, long);
 int16_t File_Save(int8_t *, void *, size_t, size_t);
 int16_t GetFileLength(int8_t *, int32_t *);
+int16_t	SetQuarterFont(int8_t *, int8_t *);
 void *MyMalloc(int32_t);
 void *MyMallocJ(int32_t);
 void *MyMallocHi(int32_t);
@@ -30,6 +34,12 @@ int16_t MyMfree(void *);
 int16_t	MyMfreeJ(void *);
 int16_t	MyMfreeHi(void *);
 int32_t	MaxMemSize(int8_t);
+int16_t Load_MACS_List(	int8_t *, int8_t (*)[256], uint32_t *);
+int16_t Get_MACS_File(int8_t *, int8_t (*)[256], uint32_t *);
+int32_t GetHisFileCnt(int8_t *);
+int32_t SetHisFileCnt(int8_t *);
+uint8_t	GetKeyInfo(void);
+uint8_t	SetKeyInfo(uint8_t);
 
 /*===========================================================================================*/
 /* 関数名	：	*/
@@ -54,7 +64,7 @@ int16_t File_Load(int8_t *fname, void *ptr, size_t size, size_t n)
 	if(fp == NULL)
 	{
 		/* ファイルが読み込めません */
-		printf("error:%sファイルが見つかりません！\n", fname);
+		printf("error：%sファイルが見つかりません！\n", fname);
 		ret = -1;
 	}
 	else
@@ -69,12 +79,13 @@ int16_t File_Load(int8_t *fname, void *ptr, size_t size, size_t n)
 			n = filelength(fileno(fp));
 		}
 		
-		fprintf(stderr, "0%%       50%%       100%%\n");
-		fprintf(stderr, "+---------+---------+   <cancel:ESC>\n");
+		fprintf(stderr, "0%% -=-=- 50%% -=-=- 100%% <cancel:ESC>\n");
 		ld = n / 100;
 		ld_mod = n % 100;
 		ld_t = 0;
 		
+		fprintf(stderr, "+---------+---------+   ");
+		fprintf(stderr, "\033[24D");	/* 左に24文字分移動 */
 		for (i = 0; i <= 100; i++) {
 			/* ファイル読み込み */
 			if(i < 100)
@@ -93,23 +104,32 @@ int16_t File_Load(int8_t *fname, void *ptr, size_t size, size_t n)
 				fprintf(stderr, "#");
 			}
 			fprintf(stderr, "\n");
-			fprintf(stderr, "%3d%%(%d/%d)\n", i, ld_t, n);
-			fprintf(stderr, "\033[2A");
+			fprintf(stderr, "%3d%%(%d/%d)", i, ld_t, n);
+			if(i < 100)
+			{
+				fprintf(stderr, "\n");
+				fprintf(stderr, "\033[2A");	/* ２行上に移動 */
+			}
 			
-			if((BITSNS( 0 ) & Bit_1) != 0u)
+			if(GetKeyInfo() == 0x01u)	/* ESC */
+			{
+				break;
+			}
+			if(GetKeyInfo() == 0x11u)	/* Q */
 			{
 				break;
 			}
 		}
 		if(i >= 100)
 		{
-			fprintf(stderr, "\n\nfinish!\n");
+			fprintf(stderr, "  File loading completed!! ");
 		}
 		else
 		{
-			fprintf(stderr, "\n\ncancel\n");
+			fprintf(stderr, "  File load canceled ");
 			ret = -1;
 		}
+		fprintf(stderr, "\n");
 		
 		/* ファイルを閉じる */
 		fclose (fp);
@@ -135,13 +155,15 @@ int16_t FileHeader_Load(int8_t *fname, void *ptr, size_t size, size_t n)
 	FILE *fp;
 	int16_t ret = 0;
 
+	char sSmallBuf[256];
+	
 	/* ファイルを開ける */
 	fp = fopen(fname, "rb");
 	
 	if(fp == NULL)
 	{
 		/* ファイルが読み込めません */
-		printf("error:%sファイルが見つかりません！\n", fname);
+		printf("error：%sファイルが見つかりません！\n", fname);
 		ret = -1;
 	}
 	else
@@ -182,31 +204,46 @@ int16_t FileHeader_Load(int8_t *fname, void *ptr, size_t size, size_t n)
 				}
 			}
 			
-			printf("FILEINFO:");
-			printf("DataVer=%x.%x ", toolver[0], toolver[1]);
-			printf("FileSize=%ld[MB] ", ld>>20);
-
+			memset(sSmallBuf, 0, sizeof(sSmallBuf));
+			SetQuarterFont("DataVer:", sSmallBuf);
+			printf("%s", sSmallBuf);
+//			printf("\033[31m%s\033[m", "DataVer:");		/* 青字 */
+			printf("\033[32m%x.%x\033[m ", toolver[0], toolver[1]);
+			
+			memset(sSmallBuf, 0, sizeof(sSmallBuf));
+			SetQuarterFont("FileSize:", sSmallBuf);
+			printf("%s", sSmallBuf);
+//			printf("\033[31m%s\033[m", "FileSize:");	/* 青字 */
+			if((ld>>20) > 0)
+			{
+				printf("\033[32m%ld[MB]\033[m ", ld>>20);
+			}
+			else if((ld>>10) > 0)
+			{
+				printf("\033[32m%ld[KB]\033[m ", ld>>10);
+			}
+			else
+			{
+				printf("\033[32m%ld[Byte]\033[m ", ld);
+			}
+			
 			if( (toolver[0] == 1) && (toolver[1] > 0x16))
 			{
-				printf("PCM=");
-				if(File_strSearch( fp, "DUALPCM/", 8, 14L ) == 0)		/* DUALPCM/ */
+				if(File_strSearch( fp, "DUALPCM/PCM8PP:", 15, 14L ) == 0)		/* DUALPCM/ */
 				{
-					printf("\n");
 				}
-				else if(File_strSearch( fp, "PCM8PP", 6, 14L ) == 0)	/* PCM8PP */
+				else if(File_strSearch( fp, "PCM8PP:", 7, 14L ) == 0)	/* PCM8PP */
 				{
-					printf("\n");
 				}
-				else if(File_strSearch( fp, "ADPCM", 5, 14L ) == 0)	/* ADPCM */
+				else if(File_strSearch( fp, "ADPCM:", 6, 14L ) == 0)	/* ADPCM */
 				{
-					printf("\n");
 				}
 				else
 				{
 					/* 何もしない */
 				}
 			}
-			printf("\n");
+			printf(" ");
 		}
 		
 		/* ファイルを閉じる */
@@ -234,6 +271,7 @@ int16_t File_strSearch(FILE *fp, char *str, int len, long file_ofst)
 	int i;
 	int cnt, sMeslen;
 	char sBuf[256];
+	char sSmallBuf[256];
 	
 	sMeslen = 0;
 	
@@ -261,7 +299,12 @@ int16_t File_strSearch(FILE *fp, char *str, int len, long file_ofst)
 	
 	if(sMeslen != 0)
 	{
-		printf("%s%s", str, sBuf);
+//		printf("\033[31m%s\033[m", str);	/* 検索文字は青字 */
+		memset(sSmallBuf, 0, sizeof(sSmallBuf));
+		SetQuarterFont(str, sSmallBuf);
+		printf("%s", sSmallBuf);
+		printf("\033[37m%s\033[m", sBuf);	/* 検索結果文字はハイライト白色 */
+//		printf("%s", sBuf);
 	}
 
 	return ret;
@@ -340,9 +383,9 @@ int16_t	GetFileLength(int8_t *pFname, int32_t *pSize)
 			else
 			{
 				*pSize = Tmp;
-//				printf("GetFileLength = (%4d, %4d)\n", *pSize, Tmp );
 			}
 		}
+//		printf("GetFileLength = (%4d, %4d)\n", *pSize, Tmp );
 
 		fclose( fp ) ;
 	}
@@ -350,6 +393,32 @@ int16_t	GetFileLength(int8_t *pFname, int32_t *pSize)
 	return ret;
 }
 
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int16_t	SetQuarterFont(int8_t *sString, int8_t *sDst)
+{
+	int16_t ret = 0;
+	int32_t length;
+	int32_t i;
+	
+	length = strlen(sString);
+	
+	for(i = 0; i < length; i++ )
+	{
+		*sDst = 0xF3;
+		sDst++;
+		*sDst = *sString;
+		sDst++;
+		sString++;
+	}
+	
+	return ret;
+}
 
 
 /*===========================================================================================*/
@@ -365,7 +434,7 @@ void *MyMalloc(int32_t Size)
 
 	if(Size >= 0x1000000u)
 	{
-		printf("error:メモリ確保サイズが大きすぎます(0x%x)\n", Size );
+		printf("error：メモリ確保サイズが大きすぎます(0x%x)\n", Size );
 	}
 	else
 
@@ -376,17 +445,17 @@ void *MyMalloc(int32_t Size)
 		
 		if(pPtr == NULL)
 		{
-			puts("error:メモリが確保できませんでした");
+			puts("error：メモリを確保することが出来ませんでした");
 		}
 		else if((uint32_t)pPtr >= 0x81000000)
 		{
 			if((uint32_t)pPtr >= 0x82000000)
 			{
-				printf("error:メモリが確保できませんでした(0x%x)\n", (uint32_t)pPtr);
+				printf("error：メモリを確保することが出来ませんでした(0x%x)\n", (uint32_t)pPtr);
 			}
 			else
 			{
-				printf("error:メモリが確保できませんでした(0x%x)\n", (uint32_t)pPtr - 0x81000000 );
+				printf("error：メモリを確保することが出来ませんでした(0x%x)\n", (uint32_t)pPtr - 0x81000000 );
 			}
 			pPtr = NULL;
 		}
@@ -425,23 +494,23 @@ void *MyMallocJ(int32_t Size)
 	
 	if(pPtr == NULL)
 	{
-		puts("error:メモリが確保できませんでした");
+		puts("error：メモリを確保することが出来ませんでした");
 	}
 	else if((uint32_t)pPtr >= 0x81000000)
 	{
 		if((uint32_t)pPtr >= 0x82000000)
 		{
-			printf("error:メモリが確保できませんでした(0x%x)\n", (uint32_t)pPtr);
+			printf("error：メモリを確保することが出来ませんでした(0x%x)\n", (uint32_t)pPtr);
 		}
 		else
 		{
-			printf("error:メモリが確保できませんでした(0x%x)\n", (uint32_t)pPtr - 0x81000000 );
+			printf("error：メモリを確保することが出来ませんでした(0x%x)\n", (uint32_t)pPtr - 0x81000000 );
 		}
 		pPtr = NULL;
 	}
 	else
 	{
-		printf("JMem Address 0x%p Size = %d[byte]\n", pPtr, Size);
+		printf("message:JMem Address 0x%p Size = %d[byte]\n", pPtr, Size);
 	}
 	
 	return (void*)pPtr;
@@ -467,7 +536,7 @@ void *MyMallocHi(int32_t Size)
 	retReg = _iocs_trap15(&stInReg, &stOutReg);	/* Trap 15 */
 	if(stOutReg.d0 == 0)
 	{
-		printf("error:メモリサイズ%d[MB](%d[byte])/一度に確保できる最大のサイズ %d[byte]\n", stOutReg.d0 >> 20u, stOutReg.d0, stOutReg.d1);
+		printf("error：メモリサイズ%d[MB](%d[byte])/一度に確保できる最大のサイズ %d[byte]\n", stOutReg.d0 >> 20u, stOutReg.d0, stOutReg.d1);
 		return pPtr;
 	}
 	
@@ -484,7 +553,7 @@ void *MyMallocHi(int32_t Size)
 	}
 	else
 	{
-		puts("error:メモリを確保することが出来ませんでした");
+		puts("error：メモリを確保することが出来ませんでした");
 	}
 	return pPtr;
 }
@@ -504,7 +573,7 @@ int16_t	MyMfree(void *pPtr)
 	
 	if(pPtr == 0)
 	{
-		puts("自プロセス、子プロセスで確保したメモリをフルで解放します");
+		puts("message:自プロセス、子プロセスで確保したメモリをフルで解放します");
 	}
 	
 	result = _dos_mfree(pPtr);
@@ -512,7 +581,7 @@ int16_t	MyMfree(void *pPtr)
 	
 	if(result < 0)
 	{
-		puts("error:メモリ解放に失敗");
+		puts("error：メモリ解放に失敗");
 		ret = -1;
 	}
 	
@@ -556,7 +625,7 @@ int16_t	MyMfreeHi(void *pPtr)
 	
 	if(pPtr == NULL)
 	{
-		puts("自プロセス、子プロセスで確保したメモリをフルで解放します");
+		puts("message:自プロセス、子プロセスで確保したメモリをフルで解放します");
 	}
 	
 	stInReg.d0 = 0xF8;					/* IOCS _HIMEM */
@@ -566,7 +635,7 @@ int16_t	MyMfreeHi(void *pPtr)
 	retReg = _iocs_trap15(&stInReg, &stOutReg);	/* Trap 15 */
 	if(stOutReg.d0 < 0)
 	{
-		puts("error:メモリ解放に失敗");
+		puts("error：メモリ解放に失敗");
 	}
 	
 	return ret;
@@ -633,7 +702,293 @@ int32_t	MaxMemSize(int8_t SizeType)
 	
 	return ret;
 }
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int16_t Load_MACS_List(int8_t *fname, int8_t (*macs_list)[256], uint32_t *list_max)
+{
+	FILE *fp;
+	int16_t ret = 0;
+	int8_t buf[1000];
+	uint32_t i=0;
+	
+	fp = fopen(fname, "r");
+	if(fp == NULL)
+	{
+		printf("warning:プレイリストを解析します(%s)\n", fname);
+		ret = Get_MACS_File(fname, &macs_list[i], list_max);
+		if(ret < 0)
+		{
+			ret = -1;
+		}
+	}
+	else
+	{
+		printf("message:プレイリストを展開します(%s)\n", fname);
+		while(fgets(buf, sizeof(buf), fp) != NULL)
+		{
+			ret = Get_MACS_File(buf, &macs_list[i], list_max);
+			if(ret < 0)
+			{
+				break;
+			}
+		}
+		fclose(fp);
+	}
+	
+	return ret;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_max)
+{
+	int16_t ret = 0;
+	int8_t z_name[256];
+	uint32_t i=0;
+	uint32_t len=0;
+	int8_t *p;
+	int8_t *Astr;
+	
+	struct _filbuf buff;
+	
+	memset(&buff, 0, sizeof(buff));
+	memset(&z_name[0], 0, sizeof(z_name));
+	
+	sscanf(sPath,"%s", z_name);
+	
+	Astr = strchr(sPath, '*');	/* *の位置 */
+	if(Astr != NULL)
+	{
+		Astr++;
+		*Astr = '.';
+		Astr++;
+		*Astr = 'M';
+		Astr++;
+		*Astr = 'C';
+		Astr++;
+		*Astr = 'S';
+		Astr++;
+		*Astr = '\0';	/* ￥があればその位置をさがして\0に置き換えpass名を得る */
+	}
+
+	len = strlen(z_name);
+	p = strrchr(z_name, '\\');	/* \の位置 */
+	if(p != NULL)
+	{
+		p++;
+		*p = '\0';	/* ￥があればその位置をさがして\0に置き換えpass名を得る */
+	}
+	else
+	{
+		strcpy( z_name, ".\\");
+	}
+//	printf("sPath = %s\n", sPath);
+//	printf("z_name = %s\n", z_name);
+	
+	ret = _dos_files(&buff, sPath, 0x31);
+	if(ret >= 0)	/* フォルダ&ファイルなら登録 */
+	{
+		if((buff.atr & 0x10) != 0u)			/* ディレクトリ判定 */
+		{
+//			printf("dir :%s\n", z_name);
+		}
+		else if((buff.atr & 0x20) != 0u)	/* ファイル判定 */
+		{
+			
+			p = _fullpath(macs_list[i], buff.name, 128);	/* フルパスを取得 */
+			if(p != NULL){
+				sprintf(macs_list[i], "%s%s", z_name, buff.name);		/* ファイルなら登録 */
+			}
+//			printf("files :%s\n", macs_list[i]);
+			i++;
+		}
+		
+		while(_dos_nfiles(&buff) >= 0)	/* 次のファイルを検索 */
+		{
+			if((buff.atr & 0x20) != 0u)	/* ファイル判定 */
+			{
+				p = _fullpath(macs_list[i], buff.name, 128);	/* フルパスを取得 */
+				if(p != NULL){
+					sprintf(macs_list[i], "%s%s", z_name, buff.name);		/* ファイルなら登録 */
+				}
+//				printf("files :%s\n", macs_list[i]);
+				i++;
+			}
+		}
+	}
+	else
+	{
+		/* 何もみつからなかった */
+		printf("error:Get_MACS_File not found :%s(%d)\n", sPath, ret);
+		ret = -1;
+	}
+	
+	*list_max = i;
+	
+	return ret;
+}
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t GetHisFileCnt(int8_t *sFullPath)
+{
+	FILE *fp;
+	int32_t nRet = 0;
+
+	/* ファイルを開ける */
+	fp = fopen("MACSPHIS.LOG", "r");
+	
+	if(fp == NULL)
+	{
+		/* ファイルが読み込めません */
+		printf("error：%sファイルが見つかりません！\n", "MACSPHIS.LOG");
+		nRet = -1;
+	}
+	else
+	{
+		char sBuf[256];
+		char sPathTmp[256];
+		
+		while(fgets(sBuf, sizeof(sBuf), fp) != NULL)
+		{
+			memset(sPathTmp, 0, sizeof(sPathTmp));
+			
+			sscanf( sBuf, "%s %d", sPathTmp, &nRet );
+//			printf("GetHisFileCnt file :%s %d\n", sPathTmp, nRet);
+//			printf("GetHisFileCnt input:%s\n", sFullPath);
+			if(strcmp(sPathTmp, sFullPath) == 0)
+			{
+				//printf("GetHisFileCnt 一致しました！\n");
+				break;
+			}
+			nRet = 0;
+		}
+		fclose(fp);	/* ファイルを閉じる */
+	}
+	
+	return nRet;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+int32_t SetHisFileCnt(int8_t *sFullPath)
+{
+	FILE *fp;
+	int32_t nRet = 0;
+	int32_t nStrlen = 0;
+	int8_t bFlag = FALSE;
+
+	/* ファイルを開ける */
+	fp = fopen("MACSPHIS.LOG", "a+");
+	if(fp == NULL)
+	{
+		/* ファイルが読み込めません */
+		printf("error：%sファイルが見つかりません！\n", "MACSPHIS.LOG");
+		nRet = -1;
+	}
+	else
+	{
+		char sBuf[256];
+		char sPathTmp[256];
+
+		memset(sBuf, 0, sizeof(sBuf));
+		
+		nStrlen = 0;
+		
+		while(fgets(sBuf, sizeof(sBuf), fp) != NULL)	/* ファイルから文字列を読み込む */
+		{
+			if(feof(fp))
+			{
+				break;
+			}
+			
+			memset(sPathTmp, 0, sizeof(sPathTmp));		/* 初期化 */
+			
+			sscanf( sBuf, "%s %d", sPathTmp, &nRet );	/* フルパスと再生回数を分ける */
+
+			nStrlen += strlen(sBuf);	/* 文字列の長さを取得 */
+			
+			if(strcmp(sPathTmp, sFullPath) == 0)	/* テキストファイルの文字列と入力の文字列を比較 */
+			{
+				if(nRet <=  8)
+				{
+					nRet++;	/* 9がMAX（2桁に突入するとズレるので） */
+
+					fseek( fp, nStrlen - 2, SEEK_SET );	/* 文字列の長さからCR/LF分と再生回数文字分バック */
+					fprintf(fp, "%d", nRet);			/* 再生回数を書き込み */
+				}
+				
+				bFlag = TRUE;	/* 文字列発見フラグをセット */
+				break;
+			}
+			
+			nStrlen += 1;	/* CR/LF分進める */
+			
+			nRet = 0;
+		}
+		
+		if((nRet == 0) && (bFlag == FALSE))	/* カウント値が０だった かつ 見つからなかった */
+		{
+			nRet++;
+			fseek( fp, 0, SEEK_END );	/* 最終行 */
+			fprintf(fp, "%s %d\n", sFullPath, nRet);	/* 書き込み */
+		}
+		
+		fclose(fp);	/* ファイルを閉じる */
+	}
+	
+	return nRet;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+uint8_t	GetKeyInfo(void)
+{
+	uint8_t ret = 0;
+	
+	ret = g_ubFileManagerGetKey;
+	
+	return ret;
+}
+
+/*===========================================================================================*/
+/* 関数名	：	*/
+/* 引数		：	*/
+/* 戻り値	：	*/
+/*-------------------------------------------------------------------------------------------*/
+/* 機能		：	*/
+/*===========================================================================================*/
+uint8_t	SetKeyInfo(uint8_t ubKey)
+{
+	uint8_t ret = 0;
+	
+	g_ubFileManagerGetKey = ubKey;
+	
+	return ret;
+}
 
 #endif	/* FILEMANAGER_C */
-
-
