@@ -339,8 +339,16 @@ int32_t	MACS_Load(int8_t *sFileName, int32_t nFileSize, int8_t bMode)
 	
 	if(pBuff == NULL)
 	{
-		printf("error：MACS_Load buffer null(%d)\n", bMode);
-		return -1;
+		if(g_nPlayListMode > 0)	/* プレイリスト再生 */
+		{
+			printf("message:メモリが確保できませんでした。(%d)\n", bMode);
+			return 1;
+		}
+		else
+		{
+			printf("error：MACS_Load buffer null(%d)\n", bMode);
+			return -1;
+		}
 	}
 	else
 	{
@@ -778,7 +786,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 	
 	int32_t	i, j;
 	
-	puts("MACS data Player「MACSplay.x」v1.06d (c)2022-2023 カタ.");
+	puts("MACS data Player「MACSplay.x」v1.06e (c)2022-2023 カタ.");
 	
 	if(argc > 1)	/* オプションチェック */
 	{
@@ -861,7 +869,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 
 				bFlag	= ((argv[i][1] == 'l') || (argv[i][1] == 'L')) ? TRUE : FALSE;
 				bFlag2	= ((argv[i][2] == 'a') || (argv[i][2] == 'A')) ? TRUE : FALSE;
-				if(bFlag == TRUE)
+				if((bFlag == TRUE) && (bFlag2 == TRUE))
 				{
 					g_nPlayListMode = 2;
 					puts("Option:プレイリスト<file>を読み込んで再生します");
@@ -991,6 +999,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 			Get_MACS_File(argv[nFilePos], g_sMACS_File_List, &g_unMACS_File_List_MAX);	/* ファイルをチェックする */
 //			memcpy(  g_sMACS_File_List[0], argv[nFilePos], sizeof(char) * strlen(argv[nFilePos]) ); 
 		}
+//		printf("g_unMACS_File_List_MAX = %d\n", g_unMACS_File_List_MAX);
 		
 		for(i=0,j=0; i < g_unMACS_File_List_MAX; i++)
 		{
@@ -1011,6 +1020,7 @@ int16_t main(int16_t argc, int8_t *argv[])
 			if(g_nPlayListMode != 0)
 			{
 				printf("\n");	/* 改行のみ */
+//				printf("-= MACS File List No.%04d %s =-\n", i+1, g_sMACS_File_List[i]);
 				printf("-= MACS File List No.%04d =-\n", i+1);
 			}
 
@@ -1052,55 +1062,52 @@ int16_t main(int16_t argc, int8_t *argv[])
 				puts("error：メインメモリの空きが不足です！");
 				
 				ret = -1;
+				break;
 			}
 			
 			_iocs_b_intvcs( 0x4C, (int32_t)p );	/* 元に戻す */
 			
-			if( (nOut == 0) && (g_nPlayListMode == 0) )	/* 単一再生時 */
+			if( nOut >= 0 )	/* 正常時 */
 			{
-				nOut = MACS_PlayCtrl();	/* 再生制御 */
-				MACS_MemFree(-1);			/* メモリ解放 */
-			}
-			else if(nOut == 1)	/* プレイリスト再生 */
-			{
-				if(g_nPlayListMode <= 1)	/* プレイリスト再生 */
+				if(g_nPlayListMode <= 1)	/* 単一再生時 単一プレイリスト再生 */
 				{
-					puts("error：再生できませんでした！skipします！");
-				}
-				else if(g_nPlayListMode == 2)	/* プレイリスト再生 */
-				{
-					nOut = MACS_PlayCtrl();	/* 再生制御 */
-					MACS_MemFree(-1);	/* メモリ解放 */
-					if(nOut < 0)
+					if(nOut == 1)
 					{
-						j = 0;
+						puts("message：再生できませんでした！skipします！");
 					}
 					else
 					{
-						if(j < 3)
-						{
-							if(j == 0)
-							{
-								puts("message:一度読み込みを中断し、再生します！");
-								i--;	/* 読めなかった分を再チャレンジ */
-							}
-							else
-							{
-								printf("warning：リトライします！(%d)", j);
-							}
-							j++;
-						}
-						else
-						{
-							nOut = -5;
-							ret = -1;
-						}
+						puts("message：再生します！");
+						ret = MACS_PlayCtrl();	/* 再生制御 */
+						MACS_MemFree(-1);		/* メモリ解放 */
+					}
+				}
+				else if(g_nPlayListMode == 2)	/* プレイリスト再生 */
+				{
+					if(nOut == 1)
+					{
+						puts("message:一度読み込みを中断し、再生します！");
+						i--;	/* 読めなかった分を再チャレンジ */
+						ret = MACS_PlayCtrl();	/* 再生制御 */
+						MACS_MemFree(-1);	/* メモリ解放 */
 					}
 				}
 				else
 				{
 					nOut = -5;	/* 異常 */
+					break;
 				}
+				
+			}
+			else
+			{
+				nOut = -5;	/* 異常 */
+				break;
+			}
+			
+			if( ret < 0 )	/* 異常 */
+			{
+				break;
 			}
 			
 			if( g_nBreak != 0u )	/* Q */
@@ -1113,7 +1120,8 @@ int16_t main(int16_t argc, int8_t *argv[])
 		/* ここは、暫定実装 */
 		if(g_nPlayListMode != 0)	/* プレイリスト再生 */
 		{
-			nOut = MACS_PlayCtrl();	/* 再生制御 */
+			puts("message:残りを再生します！");
+			ret = MACS_PlayCtrl();	/* 再生制御 */
 			MACS_MemFree(-1);	/* メモリ解放 */
 		}
 		

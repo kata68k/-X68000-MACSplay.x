@@ -714,7 +714,11 @@ int16_t Load_MACS_List(int8_t *fname, int8_t (*macs_list)[256], uint32_t *list_m
 	FILE *fp;
 	int16_t ret = 0;
 	int8_t buf[1000];
-	uint32_t i=0;
+	uint32_t i;
+	
+	i = *list_max;
+	
+	memset(&buf[0], '\0', sizeof(buf));
 	
 	fp = fopen(fname, "r");
 	if(fp == NULL)
@@ -725,18 +729,36 @@ int16_t Load_MACS_List(int8_t *fname, int8_t (*macs_list)[256], uint32_t *list_m
 		{
 			ret = -1;
 		}
+		i++;
 	}
 	else
 	{
 		printf("message:プレイリストを展開します(%s)\n", fname);
+		fseek( fp, 0, SEEK_SET  );	/* 先頭行 */
 		while(fgets(buf, sizeof(buf), fp) != NULL)
 		{
+			int8_t *p;
+			p = strchr(buf, '\n');
+			if(p)
+			{
+				*p = '\0';
+			}
 			ret = Get_MACS_File(buf, &macs_list[i], list_max);
 			if(ret < 0)
 			{
 				break;
 			}
+//			printf("buf = %s,%s(%d)\n", buf, macs_list[i], *list_max);
+			i+=(*list_max - i);
 		}
+		
+		if(ferror(fp) == 0)
+		{
+//			printf("read success!!!\n");
+		} else {
+			printf("read failure...\n");
+		}
+		
 		fclose(fp);
 	}
 	
@@ -754,6 +776,7 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 {
 	int16_t ret = 0;
 	int8_t z_name[256];
+	int8_t sPathName[256];
 	uint32_t i=0;
 	uint32_t len=0;
 	int8_t *p;
@@ -762,11 +785,13 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 	struct _filbuf buff;
 	
 	memset(&buff, 0, sizeof(buff));
-	memset(&z_name[0], 0, sizeof(z_name));
+	memset(&z_name[0], '\0', sizeof(z_name));
+	memset(&sPathName[0], '\0', sizeof(sPathName));
 	
-	sscanf(sPath,"%s", z_name);
+	sscanf(sPath,"%s", sPathName);
+	sscanf(sPathName,"%s", z_name);
 	
-	Astr = strchr(sPath, '*');	/* *の位置 */
+	Astr = strchr(sPathName, '*');	/* *の位置 */
 	if(Astr != NULL)
 	{
 		Astr++;
@@ -778,7 +803,7 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 		Astr++;
 		*Astr = 'S';
 		Astr++;
-		*Astr = '\0';	/* ￥があればその位置をさがして\0に置き換えpass名を得る */
+		*Astr = '\0';	/* *があればその位置をさがして.MCS\0に置き換える */
 	}
 
 	len = strlen(z_name);
@@ -795,7 +820,7 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 //	printf("sPath = %s\n", sPath);
 //	printf("z_name = %s\n", z_name);
 	
-	ret = _dos_files(&buff, sPath, 0x31);
+	ret = _dos_files(&buff, sPathName, 0x31);
 	if(ret >= 0)	/* フォルダ&ファイルなら登録 */
 	{
 		if((buff.atr & 0x10) != 0u)			/* ディレクトリ判定 */
@@ -808,9 +833,9 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 			p = _fullpath(macs_list[i], buff.name, 128);	/* フルパスを取得 */
 			if(p != NULL){
 				sprintf(macs_list[i], "%s%s", z_name, buff.name);		/* ファイルなら登録 */
+//				printf("files(%d):%s\n", i, macs_list[i]);
+				i++;
 			}
-//			printf("files :%s\n", macs_list[i]);
-			i++;
 		}
 		
 		while(_dos_nfiles(&buff) >= 0)	/* 次のファイルを検索 */
@@ -820,20 +845,20 @@ int16_t Get_MACS_File(int8_t *sPath, int8_t (*macs_list)[256], uint32_t *list_ma
 				p = _fullpath(macs_list[i], buff.name, 128);	/* フルパスを取得 */
 				if(p != NULL){
 					sprintf(macs_list[i], "%s%s", z_name, buff.name);		/* ファイルなら登録 */
+//					printf("files(%d):%s\n", i, macs_list[i]);
+					i++;
 				}
-//				printf("files :%s\n", macs_list[i]);
-				i++;
 			}
 		}
 	}
 	else
 	{
 		/* 何もみつからなかった */
-		printf("error:Get_MACS_File not found :%s(%d)\n", sPath, ret);
+		printf("error:Get_MACS_File not found :%s(%d)\n", sPathName, ret);
 		ret = -1;
 	}
 	
-	*list_max = i;
+	*list_max += i;
 	
 	return ret;
 }
