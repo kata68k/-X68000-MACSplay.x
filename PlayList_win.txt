@@ -1,7 +1,0 @@
-D:\ANIMATION\MACS_DAT\OLD_MACS\*.*
-W:\arc\MACS_data\特撮\SunVulcan_OP.MCS
-W:\arc\MACS_data\特撮\シャリバンED.MCS
-W:\arc\MACS_data\特撮\スピルバンOP.MCS
-W:\arc\MACS_data\特撮\仮面ライダーZO_ED.MCS
-W:\arc\MACS_data\特撮\光戦隊マスクマン.MCS
-
