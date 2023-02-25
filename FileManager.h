@@ -23,6 +23,6 @@ extern int16_t Load_MACS_List(	int8_t *, int8_t (*)[256], uint32_t *);
 extern int16_t Get_MACS_File(	int8_t *, int8_t (*)[256], uint32_t *);
 extern int32_t GetHisFileCnt(int8_t *);
 extern int32_t SetHisFileCnt(int8_t *);
-extern uint8_t SetKeyInfo(uint8_t);
+extern uint8_t SetKeyInfo(int16_t, uint8_t);
 #endif	/* FILEMANAGER_H */
 
